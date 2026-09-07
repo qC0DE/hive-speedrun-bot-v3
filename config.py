@@ -4,6 +4,9 @@ import logging
 import os
 import requests
 
+from dotenv import load_dotenv
+load_dotenv()
+
 logger = logging.getLogger("config")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -24,7 +27,7 @@ LOCAL_CONFIG_CACHE = os.path.join(CACHE_DIR, "remote_config_backup.json")
 # GitHubのURL（通常URLでもRaw URLでも対応可能）
 REMOTE_CONFIG_URL = os.environ.get(
     "REMOTE_CONFIG_URL",
-    "https://raw.githubusercontent.com/ytanuki1/speedrun-bot-config/main/config.json",
+    "https://raw.githubusercontent.com/qC0DE/speedrun-bot-config/main/config.json",
 )
 
 # ------------------------------------------------------------
@@ -32,7 +35,7 @@ REMOTE_CONFIG_URL = os.environ.get(
 # ------------------------------------------------------------
 BOT_NAME = "Hive Speedrun Leaderboard"
 BOT_VERSION = "2.1.0"
-BOT_ACTIVITY_TEXT = "/speedrun | Gravity Leaderboard\nby Yytanuki\nSuper thanks: lyger"
+BOT_ACTIVITY_TEXT = "/speedrun | Gravity Leaderboard by Yytanuki | Super thanks: lyger | Hosted by qC0DE"
 
 DEFAULT_BACKGROUND_URL = "https://i.imgur.com/1gY2pA4.png"
 GAME_NAME = "The Hive"

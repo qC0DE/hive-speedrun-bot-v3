@@ -1,14 +1,11 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-import asyncio
 import datetime as dt
 import io
 import logging
-import os
 import sys
 import time
-from threading import Thread
 from typing import Optional
 
 import discord
@@ -28,28 +25,6 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 logger = logging.getLogger("bot")
-
-# ------------------------------------------------------------
-# スリープ対策Webサーバー
-# ------------------------------------------------------------
-app = Flask("")
-
-
-@app.route("/")
-def home():
-    return "Bot is running!"
-
-
-def run_web():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
-
-
-def keep_alive():
-    t = Thread(target=run_web)
-    t.daemon = True
-    t.start()
-
 
 # ------------------------------------------------------------
 # Discord Bot
@@ -380,7 +355,6 @@ def main() -> None:
         logger.error("Environment variable DISCORD_TOKEN is not set. Cannot start bot.")
         sys.exit(1)
 
-    keep_alive()
     logger.info("%s v%s を起動します。", config.BOT_NAME, config.BOT_VERSION)
     bot.run(config.DISCORD_TOKEN, log_handler=None)
 
