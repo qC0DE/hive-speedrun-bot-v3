@@ -265,6 +265,9 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 @app_commands.choices(country=COUNTRY_CHOICES)
 @app_commands.autocomplete(division=division_autocomplete)
 @app_commands.checks.cooldown(1, 5.0)
+# --- DMおよびユーザーインストール対応の設定 ---
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def speedrun_command(
     interaction: discord.Interaction,
     country: app_commands.Choice[str],
@@ -318,6 +321,9 @@ async def speedrun_command_error(interaction: discord.Interaction, error: app_co
     description="（管理者向け）GitHubの設定とspeedrun.comのデータを即時再取得し、キャッシュを更新します。",
 )
 @app_commands.checks.has_permissions(administrator=True)
+# --- サーバー限定（DM・ユーザーインストール不可）の設定 ---
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
 async def speedrun_refresh_command(interaction: discord.Interaction) -> None:
     await interaction.response.defer(thinking=True, ephemeral=True)
     try:
