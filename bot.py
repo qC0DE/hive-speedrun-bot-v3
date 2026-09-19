@@ -57,7 +57,7 @@ def keep_alive():
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-COUNTRY_CHOICES = [
+REGION_CHOICES = [
     app_commands.Choice(name="World (all players)", value="world"),
     app_commands.Choice(name="JP (Japan)", value="jp"),
     app_commands.Choice(name="NA (North America)", value="na"),
@@ -281,22 +281,9 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
         await interaction.response.send_message(message, ephemeral=True)
 
 
-@bot.tree.command(
-    name="speedrun", description="The Hive Gravityカテゴリのリーダーボードを表示します。"
-)
-@app_commands.describe(
-    country="対象地域・プレイヤー（world / jp / na / eu / as / oc / sa / af / other）",
-    division="部門・マップ名（5maps / nocustom / 各種マップ）",
-)
-@app_commands.choices(country=COUNTRY_CHOICES)
-@app_commands.autocomplete(division=division_autocomplete)
-@app_commands.checks.cooldown(1, 5.0)
-# --- DMおよびユーザーインストール対応の設定 ---
-@app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-async def speedrun_command(
+async def _send_leaderboard(
     interaction: discord.Interaction,
-    country: app_commands.Choice[str],
+    country_key: str,
     division: str,
 ) -> None:
     if division == "_guide_placeholder_":
@@ -308,7 +295,6 @@ async def speedrun_command(
 
     await interaction.response.defer(thinking=True)
 
-    country_key = country.value
     division_key = division.strip()
 
     if division_key not in config.DIVISIONS:
@@ -333,13 +319,62 @@ async def speedrun_command(
         await interaction.followup.send(content=content, file=file)
 
 
-@speedrun_command.error
+@bot.tree.command(
+    name="speedrun", description="The Hive Gravityカテゴリの世界リーダーボードを表示します。"
+)
+@app_commands.describe(division="部門・マップ名（5maps / nocustom / 各種マップ）")
+@app_commands.autocomplete(division=division_autocomplete)
+@app_commands.checks.cooldown(1, 5.0)
+# --- DMおよびユーザーインストール対応の設定 ---
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+async def speedrun_command(interaction: discord.Interaction, division: str) -> None:
+    await _send_leaderboard(interaction, "world", division)
+
+
+@bot.tree.command(
+    name="speedrun-jp", description="The Hive Gravityカテゴリの日本リーダーボードを表示します。"
+)
+@app_commands.describe(division="部門・マップ名（5maps / nocustom / 各種マップ）")
+@app_commands.autocomplete(division=division_autocomplete)
+@app_commands.checks.cooldown(1, 5.0)
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+async def speedrun_jp_command(interaction: discord.Interaction, division: str) -> None:
+    await _send_leaderboard(interaction, "jp", division)
+
+
+@bot.tree.command(
+    name="speedrun-region", description="The Hive Gravityカテゴリの地域別リーダーボードを表示します。"
+)
+@app_commands.describe(
+    country="対象地域・プレイヤー（world / jp / na / eu / as / oc / sa / af / other）",
+    division="部門・マップ名（5maps / nocustom / 各種マップ）",
+)
+@app_commands.choices(country=REGION_CHOICES)
+@app_commands.autocomplete(division=division_autocomplete)
+@app_commands.checks.cooldown(1, 5.0)
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+async def speedrun_region_command(
+    interaction: discord.Interaction,
+    country: app_commands.Choice[str],
+    division: str,
+) -> None:
+    await _send_leaderboard(interaction, country.value, division)
+
+
 async def speedrun_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
     if isinstance(error, app_commands.CommandOnCooldown):
         await interaction.response.send_message(
             f"このコマンドはクールダウン中です。あと **{error.retry_after:.1f}秒** 後にお試しください。",
             ephemeral=True,
         )
+
+
+speedrun_command.error(speedrun_command_error)
+speedrun_jp_command.error(speedrun_command_error)
+speedrun_region_command.error(speedrun_command_error)
 
 
 @bot.tree.command(
