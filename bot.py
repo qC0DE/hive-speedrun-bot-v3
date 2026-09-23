@@ -8,6 +8,7 @@ import logging
 import os
 import sys
 import time
+from collections import OrderedDict
 from threading import Thread
 from typing import Optional
 
@@ -52,11 +53,31 @@ def keep_alive():
 
 
 # ------------------------------------------------------------
+# キャッシュ管理（LRU形式でメモリリーク防止）
+# ------------------------------------------------------------
+MAX_IMAGE_CACHE_SIZE = 100
+_image_cache: OrderedDict[tuple[str, str, int], tuple[float, bytes]] = OrderedDict()
+
+
+def _get_cached_image(key: tuple[str, str, int], updated_at: float) -> Optional[bytes]:
+    if key in _image_cache:
+        cached_updated_at, image_bytes = _image_cache[key]
+        if cached_updated_at == updated_at:
+            _image_cache.move_to_end(key)
+            return image_bytes
+    return None
+
+
+def _set_cached_image(key: tuple[str, str, int], updated_at: float, image_bytes: bytes) -> None:
+    _image_cache[key] = (updated_at, image_bytes)
+    _image_cache.move_to_end(key)
+    if len(_image_cache) > MAX_IMAGE_CACHE_SIZE:
+        _image_cache.popitem(last=False)
+
+
+# ------------------------------------------------------------
 # Discord Bot
 # ------------------------------------------------------------
-intents = discord.Intents.default()
-bot = commands.Bot(command_prefix="!", intents=intents)
-
 REGION_CHOICES = [
     app_commands.Choice(name="World (all players)", value="world"),
     app_commands.Choice(name="JP (Japan)", value="jp"),
@@ -68,6 +89,35 @@ REGION_CHOICES = [
     app_commands.Choice(name="AF (Africa)", value="af"),
     app_commands.Choice(name="Other (unlisted / no country)", value="other"),
 ]
+
+
+class MyBot(commands.Bot):
+
+    def __init__(self):
+        intents = discord.Intents.default()
+        super().__init__(command_prefix="!", intents=intents)
+
+    async def setup_hook(self) -> None:
+        """Bot起動時の初期化処理（on_readyと違い再接続時に重複実行されない）"""
+        await run_initial_refresh()
+        if not cache_refresh_loop.is_running():
+            cache_refresh_loop.start()
+            logger.info("定期キャッシュ更新ループを開始しました。")
+
+        try:
+            if config.DEV_GUILD_ID:
+                guild = discord.Object(id=int(config.DEV_GUILD_ID))
+                self.tree.copy_global_to(guild=guild)
+                synced = await self.tree.sync(guild=guild)
+                logger.info("スラッシュコマンドをギルド限定で同期しました (%d件)", len(synced))
+            else:
+                synced = await self.tree.sync()
+                logger.info("スラッシュコマンドをグローバル同期しました (%d件)", len(synced))
+        except discord.DiscordException:
+            logger.exception("スラッシュコマンドの同期に失敗しました。")
+
+
+bot = MyBot()
 
 
 async def division_autocomplete(
@@ -101,10 +151,22 @@ async def division_autocomplete(
     return matched_choices
 
 
-_image_cache: dict[tuple[str, str, int], tuple[float, bytes]] = {}
+def _sync_generate_image_bytes(div_conf: dict, entries: list, country_key: str, current_page: int, max_page: int) -> bytes:
+    """CPUバウンドな画像生成処理を行うヘルパー関数"""
+    image = generate_leaderboard_image(
+        entries=entries,
+        division_label=div_conf["label"],
+        country=country_key,
+        background_url=div_conf.get("background_url") or config.DEFAULT_BACKGROUND_URL,
+        page=current_page,
+        max_page=max_page,
+    )
+    buffer = io.BytesIO()
+    image.convert("RGB").save(buffer, format="PNG")
+    return buffer.getvalue()
 
 
-def _build_message_payload(
+async def _build_message_payload(
     country_key: str, division_key: str, page: int
 ) -> tuple[
     Optional[discord.File],
@@ -131,24 +193,20 @@ def _build_message_payload(
     max_page = page_data["max_page"]
 
     cache_key = (country_key, division_key, current_page)
+    image_bytes = _get_cached_image(cache_key, updated_at)
 
-    if cache_key in _image_cache and _image_cache[cache_key][0] == updated_at:
-        image_bytes = _image_cache[cache_key][1]
-    else:
+    if image_bytes is None:
         try:
-            image = generate_leaderboard_image(
-                entries=entries,
-                division_label=div_conf["label"],
-                country=country_key,
-                background_url=div_conf.get("background_url") or config.DEFAULT_BACKGROUND_URL,
-                page=current_page,
-                max_page=max_page,
+            # asyncio.to_thread を使い、画像生成中にイベントループを停止させない
+            image_bytes = await asyncio.to_thread(
+                _sync_generate_image_bytes,
+                div_conf,
+                entries,
+                country_key,
+                current_page,
+                max_page,
             )
-
-            buffer = io.BytesIO()
-            image.convert("RGB").save(buffer, format="PNG")
-            image_bytes = buffer.getvalue()
-            _image_cache[cache_key] = (updated_at, image_bytes)
+            _set_cached_image(cache_key, updated_at, image_bytes)
 
         except Exception:
             logger.exception("画像生成中にエラーが発生しました。")
@@ -182,6 +240,7 @@ class LeaderboardView(discord.ui.View):
         self.division_key = division_key
         self.current_page = current_page
         self.max_page = max_page
+        self.message: Optional[discord.WebhookMessage] = None
         self._update_buttons()
 
     def _update_buttons(self) -> None:
@@ -199,7 +258,7 @@ class LeaderboardView(discord.ui.View):
             )
 
     async def switch_page(self, interaction: discord.Interaction, target_page: int) -> None:
-        file, content, new_view, error = _build_message_payload(
+        file, content, new_view, error = await _build_message_payload(
             self.country_key, self.division_key, target_page
         )
 
@@ -213,6 +272,17 @@ class LeaderboardView(discord.ui.View):
         await interaction.response.edit_message(
             content=content, attachments=[file], view=new_view
         )
+
+    async def on_timeout(self) -> None:
+        """タイムアウト時にボタンを無効化"""
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = True
+        try:
+            if self.message:
+                await self.message.edit(view=self)
+        except discord.HTTPException:
+            pass
 
 
 class _PageButton(discord.ui.Button):
@@ -246,31 +316,19 @@ async def on_ready() -> None:
             type=discord.ActivityType.watching, name=config.BOT_ACTIVITY_TEXT
         )
     )
-    try:
-        if config.DEV_GUILD_ID:
-            guild = discord.Object(id=int(config.DEV_GUILD_ID))
-            bot.tree.copy_global_to(guild=guild)
-            synced = await bot.tree.sync(guild=guild)
-            logger.info("スラッシュコマンドをギルド限定で同期しました (%d件)", len(synced))
-        else:
-            synced = await bot.tree.sync()
-            logger.info("スラッシュコマンドをグローバル同期しました (%d件)", len(synced))
-    except discord.DiscordException:
-        logger.exception("スラッシュコマンドの同期に失敗しました。")
-
-    if not cache_refresh_loop.is_running():
-        await run_initial_refresh()
-        cache_refresh_loop.start()
-        logger.info("定期キャッシュ更新ループを開始しました。")
 
 
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     original = getattr(error, "original", error)
 
-    if isinstance(original, discord.HTTPException) and original.status == 429:
+    if isinstance(error, app_commands.CommandOnCooldown):
+        message = f"このコマンドはクールダウン中です。あと **{error.retry_after:.1f}秒** 後にお試しください。"
+    elif isinstance(original, discord.HTTPException) and original.status == 429:
         retry_after = getattr(original, "retry_after", 5.0)
         message = f"⚠️ 一時的に制限されています。約 **{int(retry_after) + 1}秒後** に再度お試しください。"
+    elif isinstance(error, app_commands.MissingPermissions):
+        message = "このコマンドは管理者のみ使用できます。"
     else:
         logger.exception("スラッシュコマンド実行中にエラーが発生しました。", exc_info=error)
         message = "予期しないエラーが発生しました。"
@@ -308,13 +366,14 @@ async def _send_leaderboard(
             await interaction.followup.send("指定されたマップが見つかりませんでした。入力候補から選択してください。")
             return
 
-    file, content, view, error = _build_message_payload(country_key, division_key, page=1)
+    file, content, view, error = await _build_message_payload(country_key, division_key, page=1)
     if error:
         await interaction.followup.send(error)
         return
 
     if view is not None:
-        await interaction.followup.send(content=content, file=file, view=view)
+        msg = await interaction.followup.send(content=content, file=file, view=view)
+        view.message = msg
     else:
         await interaction.followup.send(content=content, file=file)
 
@@ -325,7 +384,6 @@ async def _send_leaderboard(
 @app_commands.describe(division="部門・マップ名（5maps / nocustom / 各種マップ）")
 @app_commands.autocomplete(division=division_autocomplete)
 @app_commands.checks.cooldown(1, 5.0)
-# --- DMおよびユーザーインストール対応の設定 ---
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def speedrun_command(interaction: discord.Interaction, division: str) -> None:
@@ -358,23 +416,10 @@ async def speedrun_jp_command(interaction: discord.Interaction, division: str) -
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def speedrun_region_command(
     interaction: discord.Interaction,
-    country: app_commands.Choice[str],
+    country: str,  # ← 修正：app_commands.Choice[str] から str に変更
     division: str,
 ) -> None:
-    await _send_leaderboard(interaction, country.value, division)
-
-
-async def speedrun_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
-    if isinstance(error, app_commands.CommandOnCooldown):
-        await interaction.response.send_message(
-            f"このコマンドはクールダウン中です。あと **{error.retry_after:.1f}秒** 後にお試しください。",
-            ephemeral=True,
-        )
-
-
-speedrun_command.error(speedrun_command_error)
-speedrun_jp_command.error(speedrun_command_error)
-speedrun_region_command.error(speedrun_command_error)
+    await _send_leaderboard(interaction, country, division)
 
 
 @bot.tree.command(
@@ -382,7 +427,6 @@ speedrun_region_command.error(speedrun_command_error)
     description="（管理者向け）GitHubの設定とspeedrun.comのデータを即時再取得し、キャッシュを更新します。",
 )
 @app_commands.checks.has_permissions(administrator=True)
-# --- サーバー限定（DM・ユーザーインストール不可）の設定 ---
 @app_commands.allowed_installs(guilds=True, users=False)
 @app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
 async def speedrun_refresh_command(interaction: discord.Interaction) -> None:
@@ -401,19 +445,6 @@ async def speedrun_refresh_command(interaction: discord.Interaction) -> None:
         return
 
     await interaction.followup.send("GitHubの設定とspeedrun.comのデータを再取得し、キャッシュを更新しました。", ephemeral=True)
-
-
-@speedrun_refresh_command.error
-async def speedrun_refresh_error(interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
-    if isinstance(error, app_commands.MissingPermissions):
-        await interaction.response.send_message("このコマンドは管理者のみ使用できます。", ephemeral=True)
-    else:
-        logger.exception("speedrun_refresh コマンドでエラーが発生しました。", exc_info=error)
-        msg = "予期しないエラーが発生しました。"
-        if interaction.response.is_done():
-            await interaction.followup.send(msg, ephemeral=True)
-        else:
-            await interaction.response.send_message(msg, ephemeral=True)
 
 
 def main() -> None:
