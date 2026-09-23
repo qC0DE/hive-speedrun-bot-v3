@@ -28,6 +28,28 @@ logging.basicConfig(
 logger = logging.getLogger("bot")
 
 # ------------------------------------------------------------
+# キャッシュ管理（LRU形式でメモリリーク防止）
+# ------------------------------------------------------------
+MAX_IMAGE_CACHE_SIZE = 100
+_image_cache: OrderedDict[tuple[str, str, int], tuple[float, bytes]] = OrderedDict()
+
+
+def _get_cached_image(key: tuple[str, str, int], updated_at: float) -> Optional[bytes]:
+    if key in _image_cache:
+        cached_updated_at, image_bytes = _image_cache[key]
+        if cached_updated_at == updated_at:
+            _image_cache.move_to_end(key)
+            return image_bytes
+    return None
+
+
+def _set_cached_image(key: tuple[str, str, int], updated_at: float, image_bytes: bytes) -> None:
+    _image_cache[key] = (updated_at, image_bytes)
+    _image_cache.move_to_end(key)
+    if len(_image_cache) > MAX_IMAGE_CACHE_SIZE:
+        _image_cache.popitem(last=False)
+
+# ------------------------------------------------------------
 # Discord Bot
 # ------------------------------------------------------------
 REGION_CHOICES = [
